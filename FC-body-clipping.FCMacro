@@ -1,30 +1,43 @@
+"""FC-body-clipping.FCMacro
+
+Version: 0.1
+Author: Sedat Kuran
+License: All right reserved (advised to release under LGPL2.1 as FreeCAD)
+Copyright 2026 sedat_kuran
+
+"""
+
 import FreeCAD as App
 import FreeCADGui as Gui
 import Part
 import math
 
-try:
-    from PySide6 import QtCore, QtWidgets
-except ImportError:
-    from PySide2 import QtCore, QtWidgets
+from PySide.QtWidgets import (
+    QColorDialog, QDockWidget, QDoubleSpinBox, QMessageBox, QLabel, QCheckBox,
+    QRadioButton, QPushButton, QSlider, QSpinBox, QWidget,
+    QHBoxLayout, QVBoxLayout,
+)
 
-class LiveSectionAnalyzer(QtWidgets.QDockWidget):
+from PySide.QtCore import Qt
+
+
+class LiveSectionAnalyzer(QDockWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Interactive Section Analysis")
-        self.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
-        
+        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+
         self.base_obj = self.get_selection()
         if not self.base_obj:
             return
-            
+
         self.bbox = self.base_obj.Shape.BoundBox
-        
+
         # Calculate bounding box dimensions
         self.x_len = self.bbox.XMax - self.bbox.XMin
         self.y_len = self.bbox.YMax - self.bbox.YMin
         self.z_len = self.bbox.ZMax - self.bbox.ZMin
-        
+
         # Create all features once (for performance)
         self.section_feat = None
         self.edge_feat = None
@@ -32,7 +45,7 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
         self.bg_feat = None
         self.frozen_group = None  # Group for frozen objects
         self.init_done = False
-        
+
         self.init_ui()
         self.create_features()  # Create features once
         self.update_section()
@@ -41,7 +54,7 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
     def get_selection(self):
         sel = Gui.Selection.getSelection()
         if not sel:
-            QtWidgets.QMessageBox.warning(None, "Error", "Please select a part from the Tree View first!")
+            QMessageBox.warning(None, "Error", "Please select a part from the Tree View first!")
             return None
         return sel[0]
 
@@ -50,13 +63,13 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
         doc = App.ActiveDocument
         if not doc:
             return
-            
+
         # Background object
         self.bg_feat = doc.addObject("Part::Feature", "Live_Section_Background")
         self.bg_feat.ViewObject.ShapeColor = self.base_obj.ViewObject.ShapeColor
         self.bg_feat.ViewObject.DisplayMode = "Shaded"
         self.bg_feat.ViewObject.Transparency = 70
-        
+
         # Section fill (optional - default off)
         self.section_feat = doc.addObject("Part::Feature", "Live_Section_Fill")
         self.section_feat.ViewObject.ShapeColor = (0.75, 0.65, 0.68)
@@ -65,7 +78,7 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
         self.section_feat.ViewObject.DisplayMode = "Shaded"
         self.section_feat.ViewObject.Transparency = 0
         self.section_feat.ViewObject.Visibility = False  # Default off
-        
+
         # Section edge lines
         self.edge_feat = doc.addObject("Part::Feature", "Live_Section_Edges")
         self.edge_feat.ViewObject.LineColor = (0.0, 0.0, 0.0)
@@ -73,7 +86,7 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
         self.edge_feat.ViewObject.DisplayMode = "Wireframe"
         self.edge_feat.ViewObject.Visibility = False
         self.edge_feat.ViewObject.PointSize = 1
-        
+
         # Hatch lines
         self.hatch_feat = doc.addObject("Part::Feature", "Live_Hatch_Lines")
         self.hatch_feat.ViewObject.LineColor = (0.3, 0.3, 0.3)
@@ -81,44 +94,44 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
         self.hatch_feat.ViewObject.DisplayMode = "Wireframe"
         self.hatch_feat.ViewObject.Visibility = False
         self.hatch_feat.ViewObject.PointSize = 1
-        
+
         doc.recompute()
 
     def init_ui(self):
-        widget = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(widget)
-        
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
         # --- SECTION PLANE ---
-        layout.addWidget(QtWidgets.QLabel("<b>Section Plane:</b>"))
-        self.radio_xy = QtWidgets.QRadioButton("XY Plane")
-        self.radio_xz = QtWidgets.QRadioButton("XZ Plane")
-        self.radio_yz = QtWidgets.QRadioButton("YZ Plane (Default)")
+        layout.addWidget(QLabel("<b>Section Plane:</b>"))
+        self.radio_xy = QRadioButton("XY Plane")
+        self.radio_xz = QRadioButton("XZ Plane")
+        self.radio_yz = QRadioButton("YZ Plane (Default)")
         self.radio_yz.setChecked(True)
-        
+
         layout.addWidget(self.radio_xy)
         layout.addWidget(self.radio_xz)
         layout.addWidget(self.radio_yz)
-        
+
         # --- OFFSET (Slider + SpinBox) - Dynamic range based on bounding box ---
-        layout.addWidget(QtWidgets.QLabel("<b>Offset (Position):</b>"))
-        
+        layout.addWidget(QLabel("<b>Offset (Position):</b>"))
+
         # Calculate max offset range based on object size
         max_dim = max(self.x_len, self.y_len, self.z_len)
         self.offset_range = max_dim * 0.6  # 60% of max dimension
         self.offset_range = max(self.offset_range, 10.0)  # Minimum 10mm range
-        
+
         # Horizontal layout for offset (slider + spinbox)
-        offset_layout = QtWidgets.QHBoxLayout()
-        
-        self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        offset_layout = QHBoxLayout()
+
+        self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(-100, 100)
         self.slider.setValue(0)
-        self.slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.slider.setTickPosition(QSlider.TicksBelow)
         self.slider.setTickInterval(10)
         offset_layout.addWidget(self.slider)
-        
+
         # SpinBox for precise value entry
-        self.offset_spin = QtWidgets.QDoubleSpinBox()
+        self.offset_spin = QDoubleSpinBox()
         self.offset_spin.setRange(-self.offset_range, self.offset_range)
         self.offset_spin.setValue(0.0)
         self.offset_spin.setSingleStep(self.offset_range / 20.0)  # 20 steps
@@ -126,133 +139,133 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
         self.offset_spin.setDecimals(1)
         self.offset_spin.setMaximumWidth(100)
         offset_layout.addWidget(self.offset_spin)
-        
+
         layout.addLayout(offset_layout)
-        
+
         # Show current range info
-        range_label = QtWidgets.QLabel(f"<i>Offset range: ±{self.offset_range:.1f} mm (based on object size)</i>")
+        range_label = QLabel(f"<i>Offset range: ±{self.offset_range:.1f} mm (based on object size)</i>")
         range_label.setStyleSheet("color: #666; font-size: 10px;")
         layout.addWidget(range_label)
-        
+
         # --- BACKGROUND SETTINGS ---
-        layout.addWidget(QtWidgets.QLabel("<b>Background Settings:</b>"))
-        
+        layout.addWidget(QLabel("<b>Background Settings:</b>"))
+
         # Transparency
-        trans_layout = QtWidgets.QHBoxLayout()
-        trans_layout.addWidget(QtWidgets.QLabel("Transparency (%):"))
-        self.spin_trans = QtWidgets.QSpinBox()
+        trans_layout = QHBoxLayout()
+        trans_layout.addWidget(QLabel("Transparency (%):"))
+        self.spin_trans = QSpinBox()
         self.spin_trans.setRange(0, 100)
         self.spin_trans.setValue(70)
         trans_layout.addWidget(self.spin_trans)
         trans_layout.addStretch()
         layout.addLayout(trans_layout)
-        
+
         # Background Mirror
-        mirror_layout = QtWidgets.QHBoxLayout()
-        self.chk_mirror_bg = QtWidgets.QCheckBox("Mirror Background")
+        mirror_layout = QHBoxLayout()
+        self.chk_mirror_bg = QCheckBox("Mirror Background")
         self.chk_mirror_bg.setChecked(False)
         mirror_layout.addWidget(self.chk_mirror_bg)
         mirror_layout.addStretch()
         layout.addLayout(mirror_layout)
-        
+
         # --- SECTION FILL (OPTIONAL) ---
-        layout.addWidget(QtWidgets.QLabel("<b>Section Fill (Optional):</b>"))
-        
-        self.chk_section_fill = QtWidgets.QCheckBox("Show Section Fill")
+        layout.addWidget(QLabel("<b>Section Fill (Optional):</b>"))
+
+        self.chk_section_fill = QCheckBox("Show Section Fill")
         self.chk_section_fill.setChecked(False)  # Default off
         layout.addWidget(self.chk_section_fill)
-        
+
         # Section fill color
-        fill_color_layout = QtWidgets.QHBoxLayout()
-        fill_color_layout.addWidget(QtWidgets.QLabel("Color:"))
-        self.fill_color_btn = QtWidgets.QPushButton()
+        fill_color_layout = QHBoxLayout()
+        fill_color_layout.addWidget(QLabel("Color:"))
+        self.fill_color_btn = QPushButton()
         self.fill_color_btn.setStyleSheet("background-color: rgb(191, 166, 173); max-width: 50px;")
         self.fill_color_btn.clicked.connect(lambda: self.pick_color(self.fill_color_btn, "fill"))
         fill_color_layout.addWidget(self.fill_color_btn)
         fill_color_layout.addStretch()
         layout.addLayout(fill_color_layout)
-        
+
         # --- EDGE LINE SETTINGS ---
-        layout.addWidget(QtWidgets.QLabel("<b>Edge Line Settings:</b>"))
-        
-        self.chk_edges = QtWidgets.QCheckBox("Show Edge Lines")
+        layout.addWidget(QLabel("<b>Edge Line Settings:</b>"))
+
+        self.chk_edges = QCheckBox("Show Edge Lines")
         self.chk_edges.setChecked(True)
         layout.addWidget(self.chk_edges)
-        
+
         # Edge color
-        edge_color_layout = QtWidgets.QHBoxLayout()
-        edge_color_layout.addWidget(QtWidgets.QLabel("Color:"))
-        self.edge_color_btn = QtWidgets.QPushButton()
+        edge_color_layout = QHBoxLayout()
+        edge_color_layout.addWidget(QLabel("Color:"))
+        self.edge_color_btn = QPushButton()
         self.edge_color_btn.setStyleSheet("background-color: rgb(0, 0, 0); max-width: 50px;")
         self.edge_color_btn.clicked.connect(lambda: self.pick_color(self.edge_color_btn, "edge"))
         edge_color_layout.addWidget(self.edge_color_btn)
         edge_color_layout.addStretch()
         layout.addLayout(edge_color_layout)
-        
+
         # Edge width
-        edge_width_layout = QtWidgets.QHBoxLayout()
-        edge_width_layout.addWidget(QtWidgets.QLabel("Width:"))
-        self.edge_width_spin = QtWidgets.QDoubleSpinBox()
+        edge_width_layout = QHBoxLayout()
+        edge_width_layout.addWidget(QLabel("Width:"))
+        self.edge_width_spin = QDoubleSpinBox()
         self.edge_width_spin.setRange(0.5, 10.0)
         self.edge_width_spin.setValue(2.0)
         self.edge_width_spin.setSingleStep(0.5)
         edge_width_layout.addWidget(self.edge_width_spin)
         edge_width_layout.addStretch()
         layout.addLayout(edge_width_layout)
-        
+
         # --- HATCH SETTINGS ---
-        layout.addWidget(QtWidgets.QLabel("<b>Hatch Settings:</b>"))
-        
-        self.chk_hatch = QtWidgets.QCheckBox("Enable Hatch")
+        layout.addWidget(QLabel("<b>Hatch Settings:</b>"))
+
+        self.chk_hatch = QCheckBox("Enable Hatch")
         self.chk_hatch.setChecked(True)
         layout.addWidget(self.chk_hatch)
-        
+
         # Hatch spacing
-        spacing_layout = QtWidgets.QHBoxLayout()
-        spacing_layout.addWidget(QtWidgets.QLabel("Spacing (mm):"))
-        self.spin_spacing = QtWidgets.QDoubleSpinBox()
+        spacing_layout = QHBoxLayout()
+        spacing_layout.addWidget(QLabel("Spacing (mm):"))
+        self.spin_spacing = QDoubleSpinBox()
         self.spin_spacing.setRange(0.5, 20.0)
         self.spin_spacing.setValue(3.0)
         self.spin_spacing.setSingleStep(0.5)
         spacing_layout.addWidget(self.spin_spacing)
         spacing_layout.addStretch()
         layout.addLayout(spacing_layout)
-        
+
         # Hatch color
-        hatch_color_layout = QtWidgets.QHBoxLayout()
-        hatch_color_layout.addWidget(QtWidgets.QLabel("Color:"))
-        self.hatch_color_btn = QtWidgets.QPushButton()
+        hatch_color_layout = QHBoxLayout()
+        hatch_color_layout.addWidget(QLabel("Color:"))
+        self.hatch_color_btn = QPushButton()
         self.hatch_color_btn.setStyleSheet("background-color: rgb(77, 77, 77); max-width: 50px;")
         self.hatch_color_btn.clicked.connect(lambda: self.pick_color(self.hatch_color_btn, "hatch"))
         hatch_color_layout.addWidget(self.hatch_color_btn)
         hatch_color_layout.addStretch()
         layout.addLayout(hatch_color_layout)
-        
+
         # Hatch width
-        hatch_width_layout = QtWidgets.QHBoxLayout()
-        hatch_width_layout.addWidget(QtWidgets.QLabel("Width:"))
-        self.hatch_width_spin = QtWidgets.QDoubleSpinBox()
+        hatch_width_layout = QHBoxLayout()
+        hatch_width_layout.addWidget(QLabel("Width:"))
+        self.hatch_width_spin = QDoubleSpinBox()
         self.hatch_width_spin.setRange(0.5, 5.0)
         self.hatch_width_spin.setValue(1.0)
         self.hatch_width_spin.setSingleStep(0.5)
         hatch_width_layout.addWidget(self.hatch_width_spin)
         hatch_width_layout.addStretch()
         layout.addLayout(hatch_width_layout)
-        
+
         # Hatch point size
-        hatch_point_layout = QtWidgets.QHBoxLayout()
-        hatch_point_layout.addWidget(QtWidgets.QLabel("Point Size (px):"))
-        self.hatch_point_spin = QtWidgets.QSpinBox()
+        hatch_point_layout = QHBoxLayout()
+        hatch_point_layout.addWidget(QLabel("Point Size (px):"))
+        self.hatch_point_spin = QSpinBox()
         self.hatch_point_spin.setRange(0, 10)
         self.hatch_point_spin.setValue(1)
         self.hatch_point_spin.setSingleStep(1)
         hatch_point_layout.addWidget(self.hatch_point_spin)
         hatch_point_layout.addStretch()
         layout.addLayout(hatch_point_layout)
-        
+
         # --- FREEZE BUTTON ---
-        layout.addWidget(QtWidgets.QLabel("<b>Freeze Section:</b>"))
-        self.btn_freeze = QtWidgets.QPushButton("❄️ Freeze Section (Simple Copy with Folder)")
+        layout.addWidget(QLabel("<b>Freeze Section:</b>"))
+        self.btn_freeze = QPushButton("❄️ Freeze Section (Simple Copy with Folder)")
         self.btn_freeze.setStyleSheet("""
             QPushButton {
                 background-color: #4CAF50;
@@ -267,7 +280,7 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
         """)
         self.btn_freeze.clicked.connect(self.freeze_section)
         layout.addWidget(self.btn_freeze)
-        
+
         # --- CONNECTIONS ---
         self.radio_xy.toggled.connect(self.update_section)
         self.radio_xz.toggled.connect(self.update_section)
@@ -284,16 +297,16 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
         self.edge_width_spin.valueChanged.connect(self.update_edge_style)
         self.hatch_width_spin.valueChanged.connect(self.update_hatch_style)
         self.hatch_point_spin.valueChanged.connect(self.update_hatch_point_size)
-        
+
         # --- CLOSE BUTTON ---
-        self.btn_close = QtWidgets.QPushButton("Close Analysis")
+        self.btn_close = QPushButton("Close Analysis")
         self.btn_close.clicked.connect(self.close)
         layout.addWidget(self.btn_close)
-        
+
         layout.addStretch()
         widget.setLayout(layout)
         self.setWidget(widget)
-        Gui.getMainWindow().addDockWidget(QtCore.Qt.LeftDockWidgetArea, self)
+        Gui.getMainWindow().addDockWidget(Qt.LeftDockWidgetArea, self)
 
     def on_slider_changed(self, value):
         """Update spinbox when slider changes"""
@@ -312,22 +325,22 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
 
     def pick_color(self, button, target):
         """Open color picker dialog"""
-        color_dialog = QtWidgets.QColorDialog()
+        color_dialog = QColorDialog()
         current_color = button.palette().button().color()
         color_dialog.setCurrentColor(current_color)
-        
+
         if color_dialog.exec_():
             color = color_dialog.currentColor()
             r, g, b = color.red()/255.0, color.green()/255.0, color.blue()/255.0
             button.setStyleSheet(f"background-color: rgb({color.red()}, {color.green()}, {color.blue()}); max-width: 50px;")
-            
+
             if target == "edge":
                 self.edge_feat.ViewObject.LineColor = (r, g, b)
             elif target == "hatch":
                 self.hatch_feat.ViewObject.LineColor = (r, g, b)
             elif target == "fill":
                 self.section_feat.ViewObject.ShapeColor = (r, g, b)
-            
+
             App.ActiveDocument.recompute()
             Gui.updateGui()
 
@@ -357,7 +370,7 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
         doc = App.ActiveDocument
         if not doc:
             return
-            
+
         try:
             # Determine plane type (for naming)
             if self.radio_yz.isChecked():
@@ -366,12 +379,12 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
                 plane_name = "XZ"
             else:
                 plane_name = "XY"
-            
+
             offset_val = self.offset_spin.value()
-            
+
             # Create new group or update existing
             group_name = f"Frozen_Section_{plane_name}_Offset_{offset_val:.1f}"
-            
+
             # Delete old group
             if self.frozen_group and doc.getObject(self.frozen_group.Name):
                 # Delete all objects in group
@@ -384,14 +397,14 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
                     doc.removeObject(self.frozen_group.Name)
                 except:
                     pass
-            
+
             # Create new group
             self.frozen_group = doc.addObject("App::DocumentObjectGroup", group_name)
             self.frozen_group.Label = f"Frozen Section ({plane_name}, Offset: {offset_val:.1f} mm)"
-            
+
             # Copy section elements
             copied_objects = []
-            
+
             # 1. Copy background object
             if self.bg_feat and self.bg_feat.Shape:
                 bg_copy = doc.addObject("Part::Feature", f"Section_Background_{plane_name}")
@@ -400,7 +413,7 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
                 bg_copy.ViewObject.DisplayMode = "Shaded"
                 bg_copy.ViewObject.Transparency = self.spin_trans.value()
                 copied_objects.append(bg_copy)
-            
+
             # 2. Copy section fill (if visible)
             if self.chk_section_fill.isChecked() and self.section_feat and self.section_feat.Shape:
                 fill_copy = doc.addObject("Part::Feature", f"Section_Fill_{plane_name}")
@@ -411,7 +424,7 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
                 fill_copy.ViewObject.DisplayMode = "Shaded"
                 fill_copy.ViewObject.Transparency = 0
                 copied_objects.append(fill_copy)
-            
+
             # 3. Copy edge lines
             if self.chk_edges.isChecked() and self.edge_feat and self.edge_feat.Shape:
                 edge_copy = doc.addObject("Part::Feature", f"Section_Edges_{plane_name}")
@@ -421,7 +434,7 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
                 edge_copy.ViewObject.DisplayMode = "Wireframe"
                 edge_copy.ViewObject.PointSize = 1
                 copied_objects.append(edge_copy)
-            
+
             # 4. Copy hatch lines
             if self.chk_hatch.isChecked() and self.hatch_feat and self.hatch_feat.Shape:
                 hatch_copy = doc.addObject("Part::Feature", f"Section_Hatch_{plane_name}")
@@ -431,9 +444,9 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
                 hatch_copy.ViewObject.DisplayMode = "Wireframe"
                 hatch_copy.ViewObject.PointSize = self.hatch_point_spin.value()
                 copied_objects.append(hatch_copy)
-            
+
             if not copied_objects:
-                QtWidgets.QMessageBox.warning(None, "Warning", "No section elements found to copy!")
+                QMessageBox.warning(None, "Warning", "No section elements found to copy!")
                 # Delete empty group
                 try:
                     doc.removeObject(self.frozen_group.Name)
@@ -441,25 +454,25 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
                 except:
                     pass
                 return
-            
+
             # Add all copied objects to group
             for obj in copied_objects:
                 self.frozen_group.addObject(obj)
-            
+
             # Make group visible
             self.frozen_group.ViewObject.Visibility = True
-            
+
             # Select group in tree view
             Gui.Selection.clearSelection()
             Gui.Selection.addSelection(self.frozen_group)
-            
+
             doc.recompute()
             Gui.updateGui()
-            
+
             # Success message
-            QtWidgets.QMessageBox.information(
-                None, 
-                "Success", 
+            QMessageBox.information(
+                None,
+                "Success",
                 f"Section successfully frozen!\n"
                 f"Group name: {self.frozen_group.Label}\n"
                 f"Element count: {len(copied_objects)}\n"
@@ -467,18 +480,18 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
                 f"📁 Contents:\n" +
                 "\n".join([f"  • {obj.Label}" for obj in copied_objects])
             )
-            
+
         except Exception as e:
             App.Console.PrintError(f"Freeze Error: {str(e)}\n")
-            QtWidgets.QMessageBox.critical(None, "Error", f"Error while freezing section:\n{str(e)}")
+            QMessageBox.critical(None, "Error", f"Error while freezing section:\n{str(e)}")
 
     def generate_hatch_lines_optimized(self, face, plane_type, center_pos, spacing):
         """Optimized hatch generation - only generate lines within face boundaries"""
         lines = []
-        
+
         # Get face 2D bounding box
         bbox = face.BoundBox
-        
+
         # Determine u,v axes based on plane
         if plane_type == "YZ":
             u_min, u_max = bbox.YMin - 2, bbox.YMax + 2
@@ -489,11 +502,11 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
         else:  # XY
             u_min, u_max = bbox.XMin - 2, bbox.XMax + 2
             v_min, v_max = bbox.YMin - 2, bbox.YMax + 2
-        
+
         # Calculate step
         step = spacing * math.sqrt(2)
         current = u_min
-        
+
         # Generate hatch lines
         while current < u_max + (v_max - v_min):
             # Line start and end points
@@ -506,7 +519,7 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
             else:
                 p1 = App.Vector(current, v_min, center_pos)
                 p2 = App.Vector(current - (v_max - v_min), v_max, center_pos)
-            
+
             try:
                 # Create line and intersect with face
                 line_shape = Part.makeLine(p1, p2)
@@ -515,27 +528,27 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
                     lines.append(common_part)
             except:
                 pass
-            
+
             current += step
-        
+
         return lines
 
     def update_section(self):
         doc = App.ActiveDocument
         if not doc or not self.base_obj:
             return
-            
+
         # Hide main object
         self.base_obj.ViewObject.Visibility = False
-        
+
         # Get offset value from spinbox (already in mm)
         offset_val = self.offset_spin.value()
-        
+
         x_len = self.x_len
         y_len = self.y_len
         z_len = self.z_len
         max_dim = max(x_len, y_len, z_len) * 3
-        
+
         # Determine plane type
         if self.radio_yz.isChecked():
             plane_type = "YZ"
@@ -552,22 +565,22 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
             center_pos = self.bbox.Center.z + offset_val  # Direct mm offset
             plane_base = App.Vector(self.bbox.Center.x, self.bbox.Center.y, center_pos)
             plane_normal = App.Vector(0, 0, 1)
-            
+
         try:
             # Create cutter box
             cutter_box = Part.makeBox(max_dim, max_dim, max_dim)
             cutter_box.translate(App.Vector(-max_dim/2, -max_dim/2, 0))
-            
+
             if plane_type == "YZ":
                 cutter_box.rotate(App.Vector(0,0,0), App.Vector(0,1,0), 90)
             elif plane_type == "XZ":
                 cutter_box.rotate(App.Vector(0,0,0), App.Vector(1,0,0), -90)
-                
+
             cutter_box.translate(plane_base)
-            
+
             # Calculate background solid
             cut_solid = self.base_obj.Shape.cut(cutter_box)
-            
+
             # Mirror background if enabled
             if self.chk_mirror_bg.isChecked():
                 # Mirror based on section plane
@@ -581,10 +594,10 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
                 else:  # XY
                     mirror_matrix.scale(1, 1, -1)
                     mirror_matrix.move(App.Vector(0, 0, 2 * plane_base.z))
-                
+
                 mirrored_solid = cut_solid.transformGeometry(mirror_matrix)
                 cut_solid = mirrored_solid
-            
+
             # Find section faces
             cut_faces = []
             for face in cut_solid.Faces:
@@ -592,20 +605,20 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
                 val = face_center.x if plane_type == "YZ" else (face_center.y if plane_type == "XZ" else face_center.z)
                 if abs(val - center_pos) < 1e-2:
                     cut_faces.append(face)
-            
+
             if cut_faces:
                 # --- UPDATE BACKGROUND ---
                 self.bg_feat.Shape = cut_solid
                 self.bg_feat.ViewObject.Transparency = self.spin_trans.value()
                 self.bg_feat.ViewObject.Visibility = True
-                
+
                 # --- SECTION FILL (OPTIONAL) ---
                 if self.chk_section_fill.isChecked():
                     self.section_feat.Shape = Part.Compound(cut_faces)
                     self.section_feat.ViewObject.Visibility = True
                 else:
                     self.section_feat.ViewObject.Visibility = False
-                
+
                 # --- EDGE LINES ---
                 if self.chk_edges.isChecked():
                     # Collect all edges
@@ -613,7 +626,7 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
                     for face in cut_faces:
                         for edge in face.Edges:
                             edges.append(edge)
-                    
+
                     if edges:
                         # Use removeSplitter for cleaner look
                         section_shape = Part.Compound(cut_faces)
@@ -627,16 +640,16 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
                         self.edge_feat.ViewObject.Visibility = False
                 else:
                     self.edge_feat.ViewObject.Visibility = False
-                
+
                 # --- HATCH LINES ---
                 if self.chk_hatch.isChecked():
                     all_hatch_lines = []
                     spacing = self.spin_spacing.value()
-                    
+
                     for face in cut_faces:
                         lines = self.generate_hatch_lines_optimized(face, plane_type, center_pos, spacing)
                         all_hatch_lines.extend(lines)
-                    
+
                     if all_hatch_lines:
                         self.hatch_feat.Shape = Part.Compound(all_hatch_lines)
                         self.hatch_feat.ViewObject.Visibility = True
@@ -645,10 +658,10 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
                         self.hatch_feat.ViewObject.Visibility = False
                 else:
                     self.hatch_feat.ViewObject.Visibility = False
-                    
+
         except Exception as e:
             App.Console.PrintError(f"Section Error: {str(e)}\n")
-            
+
         doc.recompute()
         Gui.updateGui()
 
@@ -656,7 +669,7 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
         """Cleanup on close"""
         if self.base_obj:
             self.base_obj.ViewObject.Visibility = True
-            
+
         doc = App.ActiveDocument
         if doc:
             # Delete all features except frozen group
@@ -667,7 +680,7 @@ class LiveSectionAnalyzer(QtWidgets.QDockWidget):
                     except:
                         pass
             doc.recompute()
-            
+
         super().closeEvent(event)
 
 # Run the macro
