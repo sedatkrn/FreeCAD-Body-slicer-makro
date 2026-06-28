@@ -1,0 +1,933 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import math
+
+try:
+    from PySide6 import QtCore, QtWidgets
+except ImportError:
+    from PySide2 import QtCore, QtWidgets
+
+class LiveSectionAnalyzer(QtWidgets.QDockWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Interactive Section Analysis")
+        self.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
+        
+        self.base_obj = self.get_selection()
+        if not self.base_obj:
+            return
+            
+        self.bbox = self.base_obj.Shape.BoundBox
+        self.diag = self.bbox.DiagonalLength
+        
+        # Calculate bounding box dimensions
+        self.x_len = self.bbox.XMax - self.bbox.XMin
+        self.y_len = self.bbox.YMax - self.bbox.YMin
+        self.z_len = self.bbox.ZMax - self.bbox.ZMin
+        
+        # Calculate tolerance based on object size
+        self.tolerance = max(self.x_len, self.y_len, self.z_len) * 1e-5
+        self.tolerance = max(self.tolerance, 0.01)
+        
+        # Create all features once (for performance)
+        self.section_feat = None
+        self.edge_feat = None
+        self.hatch_feat = None
+        self.bg_feat = None
+        self.frozen_counter = 0
+        self.init_done = False
+        self._updating = False
+        self._update_timer = None
+        
+        self.init_ui()
+        self.create_features()
+        self.update_section()
+        self.init_done = True
+
+    def get_selection(self):
+        sel = Gui.Selection.getSelection()
+        if not sel:
+            QtWidgets.QMessageBox.warning(None, "Error", "Please select a part from the Tree View first!")
+            return None
+        return sel[0]
+
+    def create_features(self):
+        """Create all features once"""
+        doc = App.ActiveDocument
+        if not doc:
+            return
+            
+        # Background object
+        self.bg_feat = doc.addObject("Part::Feature", "Live_Section_Background")
+        self.bg_feat.ViewObject.ShapeColor = self.base_obj.ViewObject.ShapeColor
+        self.bg_feat.ViewObject.DisplayMode = "Shaded"
+        self.bg_feat.ViewObject.Transparency = 70
+        
+        # Section fill (optional - default off)
+        self.section_feat = doc.addObject("Part::Feature", "Live_Section_Fill")
+        self.section_feat.ViewObject.ShapeColor = (0.75, 0.65, 0.68)
+        self.section_feat.ViewObject.LineColor = (0.0, 0.0, 0.0)
+        self.section_feat.ViewObject.LineWidth = 3.0
+        self.section_feat.ViewObject.DisplayMode = "Shaded"
+        self.section_feat.ViewObject.Transparency = 0
+        self.section_feat.ViewObject.Visibility = False
+        
+        # Section edge lines
+        self.edge_feat = doc.addObject("Part::Feature", "Live_Section_Edges")
+        self.edge_feat.ViewObject.LineColor = (0.0, 0.0, 0.0)
+        self.edge_feat.ViewObject.LineWidth = 2.0
+        self.edge_feat.ViewObject.DisplayMode = "Flat Lines"
+        self.edge_feat.ViewObject.DrawStyle = "Solid"
+        self.edge_feat.ViewObject.Visibility = False
+        self.edge_feat.ViewObject.PointSize = 1
+        
+        # Hatch lines - ANSI 31 standard (dark gray/black)
+        self.hatch_feat = doc.addObject("Part::Feature", "Live_Hatch_Lines")
+        self.hatch_feat.ViewObject.LineColor = (0.2, 0.2, 0.2)
+        self.hatch_feat.ViewObject.LineWidth = 1.0
+        self.hatch_feat.ViewObject.DisplayMode = "Flat Lines"
+        self.hatch_feat.ViewObject.DrawStyle = "Solid"
+        self.hatch_feat.ViewObject.Visibility = False
+        self.hatch_feat.ViewObject.PointSize = 1
+        
+        doc.recompute()
+
+    def init_ui(self):
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+        layout.setSpacing(4)
+        layout.setContentsMargins(4, 4, 4, 4)
+        
+        # --- SECTION PLANE (Tek satır) ---
+        plane_layout = QtWidgets.QHBoxLayout()
+        plane_layout.addWidget(QtWidgets.QLabel("<b>Plane:</b>"))
+        self.radio_xy = QtWidgets.QRadioButton("XY")
+        self.radio_xz = QtWidgets.QRadioButton("XZ")
+        self.radio_yz = QtWidgets.QRadioButton("YZ")
+        self.radio_yz.setChecked(True)
+        plane_layout.addWidget(self.radio_xy)
+        plane_layout.addWidget(self.radio_xz)
+        plane_layout.addWidget(self.radio_yz)
+        plane_layout.addStretch()
+        layout.addLayout(plane_layout)
+        
+        # --- SECTION ROTATION (Tek satır, 3 spinbox) ---
+        rot_layout = QtWidgets.QHBoxLayout()
+        rot_layout.addWidget(QtWidgets.QLabel("<b>Rot:</b>"))
+        
+        rot_layout.addWidget(QtWidgets.QLabel("X:"))
+        self.rotation_x_spin = QtWidgets.QDoubleSpinBox()
+        self.rotation_x_spin.setRange(-180, 180)
+        self.rotation_x_spin.setValue(0)
+        self.rotation_x_spin.setSingleStep(5)
+        self.rotation_x_spin.setSuffix("°")
+        self.rotation_x_spin.setDecimals(0)
+        self.rotation_x_spin.setMaximumWidth(55)
+        rot_layout.addWidget(self.rotation_x_spin)
+        
+        rot_layout.addWidget(QtWidgets.QLabel("Y:"))
+        self.rotation_y_spin = QtWidgets.QDoubleSpinBox()
+        self.rotation_y_spin.setRange(-180, 180)
+        self.rotation_y_spin.setValue(0)
+        self.rotation_y_spin.setSingleStep(5)
+        self.rotation_y_spin.setSuffix("°")
+        self.rotation_y_spin.setDecimals(0)
+        self.rotation_y_spin.setMaximumWidth(55)
+        rot_layout.addWidget(self.rotation_y_spin)
+        
+        rot_layout.addWidget(QtWidgets.QLabel("Z:"))
+        self.rotation_z_spin = QtWidgets.QDoubleSpinBox()
+        self.rotation_z_spin.setRange(-180, 180)
+        self.rotation_z_spin.setValue(0)
+        self.rotation_z_spin.setSingleStep(5)
+        self.rotation_z_spin.setSuffix("°")
+        self.rotation_z_spin.setDecimals(0)
+        self.rotation_z_spin.setMaximumWidth(55)
+        rot_layout.addWidget(self.rotation_z_spin)
+        
+        rot_layout.addStretch()
+        layout.addLayout(rot_layout)
+        
+        # --- OFFSET (Slider + SpinBox tek satır) ---
+        offset_layout = QtWidgets.QHBoxLayout()
+        offset_layout.addWidget(QtWidgets.QLabel("<b>Offset:</b>"))
+        
+        self.offset_range = self.diag * 1.2
+        
+        self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.slider.setRange(-100, 100)
+        self.slider.setValue(0)
+        self.slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.slider.setTickInterval(25)
+        offset_layout.addWidget(self.slider)
+        
+        self.offset_spin = QtWidgets.QDoubleSpinBox()
+        self.offset_spin.setRange(-self.offset_range, self.offset_range)
+        self.offset_spin.setValue(0.0)
+        self.offset_spin.setSingleStep(self.offset_range / 20.0)
+        self.offset_spin.setSuffix(" mm")
+        self.offset_spin.setDecimals(1)
+        self.offset_spin.setMaximumWidth(80)
+        offset_layout.addWidget(self.offset_spin)
+        
+        layout.addLayout(offset_layout)
+        
+        # --- BACKGROUND SETTINGS (Tek satır) ---
+        bg_layout = QtWidgets.QHBoxLayout()
+        bg_layout.addWidget(QtWidgets.QLabel("<b>BG:</b>"))
+        bg_layout.addWidget(QtWidgets.QLabel("Trans:"))
+        self.spin_trans = QtWidgets.QSpinBox()
+        self.spin_trans.setRange(0, 100)
+        self.spin_trans.setValue(70)
+        self.spin_trans.setSuffix("%")
+        self.spin_trans.setMaximumWidth(55)
+        bg_layout.addWidget(self.spin_trans)
+        
+        self.chk_mirror_bg = QtWidgets.QCheckBox("Mirror")
+        self.chk_mirror_bg.setChecked(False)
+        bg_layout.addWidget(self.chk_mirror_bg)
+        
+        bg_layout.addStretch()
+        layout.addLayout(bg_layout)
+        
+        # --- SECTION FILL (Tek satır) ---
+        fill_layout = QtWidgets.QHBoxLayout()
+        fill_layout.addWidget(QtWidgets.QLabel("<b>Fill:</b>"))
+        self.chk_section_fill = QtWidgets.QCheckBox("Show")
+        self.chk_section_fill.setChecked(False)
+        fill_layout.addWidget(self.chk_section_fill)
+        
+        fill_layout.addWidget(QtWidgets.QLabel("Color:"))
+        self.fill_color_btn = QtWidgets.QPushButton()
+        self.fill_color_btn.setStyleSheet("background-color: rgb(191, 166, 173); max-width: 30px; max-height: 20px;")
+        self.fill_color_btn.clicked.connect(lambda: self.pick_color(self.fill_color_btn, "fill"))
+        fill_layout.addWidget(self.fill_color_btn)
+        
+        fill_layout.addStretch()
+        layout.addLayout(fill_layout)
+        
+        # --- EDGE LINE SETTINGS (Tek satır) ---
+        edge_layout = QtWidgets.QHBoxLayout()
+        edge_layout.addWidget(QtWidgets.QLabel("<b>Edges:</b>"))
+        self.chk_edges = QtWidgets.QCheckBox("Show")
+        self.chk_edges.setChecked(True)
+        edge_layout.addWidget(self.chk_edges)
+        
+        edge_layout.addWidget(QtWidgets.QLabel("Color:"))
+        self.edge_color_btn = QtWidgets.QPushButton()
+        self.edge_color_btn.setStyleSheet("background-color: rgb(0, 0, 0); max-width: 30px; max-height: 20px;")
+        self.edge_color_btn.clicked.connect(lambda: self.pick_color(self.edge_color_btn, "edge"))
+        edge_layout.addWidget(self.edge_color_btn)
+        
+        edge_layout.addWidget(QtWidgets.QLabel("W:"))
+        self.edge_width_spin = QtWidgets.QDoubleSpinBox()
+        self.edge_width_spin.setRange(0.5, 10.0)
+        self.edge_width_spin.setValue(2.0)
+        self.edge_width_spin.setSingleStep(0.5)
+        self.edge_width_spin.setMaximumWidth(45)
+        edge_layout.addWidget(self.edge_width_spin)
+        
+        edge_layout.addStretch()
+        layout.addLayout(edge_layout)
+        
+        # --- HATCH SETTINGS (Tek satır) ---
+        hatch_layout = QtWidgets.QHBoxLayout()
+        hatch_layout.addWidget(QtWidgets.QLabel("<b>Hatch:</b>"))
+        self.chk_hatch = QtWidgets.QCheckBox("Enable")
+        self.chk_hatch.setChecked(True)
+        hatch_layout.addWidget(self.chk_hatch)
+        
+        hatch_layout.addWidget(QtWidgets.QLabel("Spc:"))
+        self.spin_spacing = QtWidgets.QDoubleSpinBox()
+        self.spin_spacing.setRange(0.5, 20.0)
+        self.spin_spacing.setValue(3.0)
+        self.spin_spacing.setSingleStep(0.5)
+        self.spin_spacing.setMaximumWidth(45)
+        hatch_layout.addWidget(self.spin_spacing)
+        
+        hatch_layout.addWidget(QtWidgets.QLabel("Color:"))
+        self.hatch_color_btn = QtWidgets.QPushButton()
+        self.hatch_color_btn.setStyleSheet("background-color: rgb(51, 51, 51); max-width: 30px; max-height: 20px;")
+        self.hatch_color_btn.clicked.connect(lambda: self.pick_color(self.hatch_color_btn, "hatch"))
+        hatch_layout.addWidget(self.hatch_color_btn)
+        
+        hatch_layout.addWidget(QtWidgets.QLabel("W:"))
+        self.hatch_width_spin = QtWidgets.QDoubleSpinBox()
+        self.hatch_width_spin.setRange(0.5, 5.0)
+        self.hatch_width_spin.setValue(1.0)
+        self.hatch_width_spin.setSingleStep(0.5)
+        self.hatch_width_spin.setMaximumWidth(45)
+        hatch_layout.addWidget(self.hatch_width_spin)
+        
+        hatch_layout.addWidget(QtWidgets.QLabel("Pt:"))
+        self.hatch_point_spin = QtWidgets.QSpinBox()
+        self.hatch_point_spin.setRange(0, 10)
+        self.hatch_point_spin.setValue(1)
+        self.hatch_point_spin.setSingleStep(1)
+        self.hatch_point_spin.setMaximumWidth(35)
+        hatch_layout.addWidget(self.hatch_point_spin)
+        
+        hatch_layout.addStretch()
+        layout.addLayout(hatch_layout)
+        
+        # --- FREEZE BUTTON ---
+        self.btn_freeze = QtWidgets.QPushButton("❄️ Freeze Section")
+        self.btn_freeze.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                font-weight: bold;
+                padding: 4px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        self.btn_freeze.clicked.connect(self.freeze_section)
+        layout.addWidget(self.btn_freeze)
+        
+        # --- CLOSE BUTTON ---
+        self.btn_close = QtWidgets.QPushButton("✖ Close Analysis")
+        self.btn_close.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                font-weight: bold;
+                padding: 4px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+            }
+        """)
+        self.btn_close.clicked.connect(self.close)
+        layout.addWidget(self.btn_close)
+        
+        # --- CONNECTIONS ---
+        self.radio_xy.toggled.connect(self.schedule_update)
+        self.radio_xz.toggled.connect(self.schedule_update)
+        self.radio_yz.toggled.connect(self.schedule_update)
+        self.rotation_x_spin.valueChanged.connect(self.schedule_update)
+        self.rotation_y_spin.valueChanged.connect(self.schedule_update)
+        self.rotation_z_spin.valueChanged.connect(self.schedule_update)
+        self.slider.valueChanged.connect(self.on_slider_changed)
+        self.offset_spin.valueChanged.connect(self.on_spin_changed)
+        self.spin_trans.valueChanged.connect(self.schedule_update)
+        self.chk_mirror_bg.stateChanged.connect(self.schedule_update)
+        self.chk_section_fill.stateChanged.connect(self.schedule_update)
+        self.chk_hatch.stateChanged.connect(self.schedule_update)
+        self.spin_spacing.valueChanged.connect(self.schedule_update)
+        self.chk_edges.stateChanged.connect(self.schedule_update)
+        self.edge_width_spin.valueChanged.connect(self.update_edge_style)
+        self.hatch_width_spin.valueChanged.connect(self.update_hatch_style)
+        self.hatch_point_spin.valueChanged.connect(self.update_hatch_point_size)
+        
+        widget.setLayout(layout)
+        self.setWidget(widget)
+        Gui.getMainWindow().addDockWidget(QtCore.Qt.LeftDockWidgetArea, self)
+
+    def schedule_update(self):
+        """Schedule update with debounce"""
+        if self._update_timer:
+            self._update_timer.stop()
+        else:
+            self._update_timer = QtCore.QTimer()
+            self._update_timer.setSingleShot(True)
+            self._update_timer.timeout.connect(self.update_section)
+        self._update_timer.start(50)
+
+    def on_slider_changed(self, value):
+        """Update spinbox when slider changes"""
+        if self._updating:
+            return
+        self._updating = True
+        mapped_value = (value / 100.0) * self.offset_range
+        self.offset_spin.blockSignals(True)
+        self.offset_spin.setValue(mapped_value)
+        self.offset_spin.blockSignals(False)
+        self._updating = False
+        self.schedule_update()
+
+    def on_spin_changed(self, value):
+        """Update slider when spinbox changes"""
+        if self._updating:
+            return
+        self._updating = True
+        slider_value = int((value / self.offset_range) * 100)
+        slider_value = max(-100, min(100, slider_value))
+        self.slider.blockSignals(True)
+        self.slider.setValue(slider_value)
+        self.slider.blockSignals(False)
+        self._updating = False
+        self.schedule_update()
+
+    def pick_color(self, button, target):
+        """Open color picker dialog"""
+        color_dialog = QtWidgets.QColorDialog()
+        current_color = button.palette().button().color()
+        color_dialog.setCurrentColor(current_color)
+        
+        if color_dialog.exec_():
+            color = color_dialog.currentColor()
+            r, g, b = color.red()/255.0, color.green()/255.0, color.blue()/255.0
+            button.setStyleSheet(f"background-color: rgb({color.red()}, {color.green()}, {color.blue()}); max-width: 30px; max-height: 20px;")
+            
+            if target == "edge":
+                self.edge_feat.ViewObject.LineColor = (r, g, b)
+            elif target == "hatch":
+                self.hatch_feat.ViewObject.LineColor = (r, g, b)
+            elif target == "fill":
+                self.section_feat.ViewObject.ShapeColor = (r, g, b)
+            
+            Gui.updateGui()
+
+    def update_edge_style(self):
+        """Update edge width"""
+        if self.edge_feat:
+            self.edge_feat.ViewObject.LineWidth = self.edge_width_spin.value()
+            Gui.updateGui()
+
+    def update_hatch_style(self):
+        """Update hatch width"""
+        if self.hatch_feat:
+            self.hatch_feat.ViewObject.LineWidth = self.hatch_width_spin.value()
+            Gui.updateGui()
+
+    def update_hatch_point_size(self):
+        """Update hatch point size"""
+        if self.hatch_feat:
+            self.hatch_feat.ViewObject.PointSize = self.hatch_point_spin.value()
+            Gui.updateGui()
+
+    def freeze_section(self):
+        """Freeze current section view with incremental naming"""
+        doc = App.ActiveDocument
+        if not doc:
+            return
+            
+        try:
+            if self.radio_yz.isChecked():
+                plane_name = "YZ"
+            elif self.radio_xz.isChecked():
+                plane_name = "XZ"
+            else:
+                plane_name = "XY"
+            
+            offset_val = self.offset_spin.value()
+            rot_x = self.rotation_x_spin.value()
+            rot_y = self.rotation_y_spin.value()
+            rot_z = self.rotation_z_spin.value()
+            
+            self.frozen_counter += 1
+            
+            group_name = f"Frozen_Section_{self.frozen_counter:03d}_{plane_name}"
+            group_label = f"Frozen Section #{self.frozen_counter:03d} ({plane_name}, Off:{offset_val:.1f}mm, RX:{rot_x:.0f}°, RY:{rot_y:.0f}°, RZ:{rot_z:.0f}°)"
+            
+            frozen_group = doc.addObject("App::DocumentObjectGroup", group_name)
+            frozen_group.Label = group_label
+            
+            copied_objects = []
+            
+            # Copy background
+            if self.bg_feat and self.bg_feat.Shape:
+                bg_copy = doc.addObject("Part::Feature", f"BG_{self.frozen_counter:03d}_{plane_name}")
+                bg_copy.Shape = self.bg_feat.Shape
+                bg_copy.ViewObject.ShapeColor = self.bg_feat.ViewObject.ShapeColor
+                bg_copy.ViewObject.DisplayMode = "Shaded"
+                bg_copy.ViewObject.Transparency = self.spin_trans.value()
+                copied_objects.append(bg_copy)
+            
+            # Copy section fill (if visible)
+            if self.chk_section_fill.isChecked() and self.section_feat and self.section_feat.Shape:
+                fill_copy = doc.addObject("Part::Feature", f"Fill_{self.frozen_counter:03d}_{plane_name}")
+                fill_copy.Shape = self.section_feat.Shape
+                fill_copy.ViewObject.ShapeColor = self.section_feat.ViewObject.ShapeColor
+                fill_copy.ViewObject.LineColor = self.section_feat.ViewObject.LineColor
+                fill_copy.ViewObject.LineWidth = self.section_feat.ViewObject.LineWidth
+                fill_copy.ViewObject.DisplayMode = "Shaded"
+                fill_copy.ViewObject.Transparency = 0
+                copied_objects.append(fill_copy)
+            
+            # Copy edge lines
+            if self.chk_edges.isChecked() and self.edge_feat and self.edge_feat.Shape:
+                edge_copy = doc.addObject("Part::Feature", f"Edges_{self.frozen_counter:03d}_{plane_name}")
+                edge_copy.Shape = self.edge_feat.Shape
+                edge_copy.ViewObject.LineColor = self.edge_feat.ViewObject.LineColor
+                edge_copy.ViewObject.LineWidth = self.edge_feat.ViewObject.LineWidth
+                edge_copy.ViewObject.DisplayMode = "Flat Lines"
+                edge_copy.ViewObject.DrawStyle = "Solid"
+                edge_copy.ViewObject.PointSize = 1
+                copied_objects.append(edge_copy)
+            
+            # Copy hatch lines
+            if self.chk_hatch.isChecked() and self.hatch_feat and self.hatch_feat.Shape:
+                hatch_copy = doc.addObject("Part::Feature", f"Hatch_{self.frozen_counter:03d}_{plane_name}")
+                hatch_copy.Shape = self.hatch_feat.Shape
+                hatch_copy.ViewObject.LineColor = self.hatch_feat.ViewObject.LineColor
+                hatch_copy.ViewObject.LineWidth = self.hatch_feat.ViewObject.LineWidth
+                hatch_copy.ViewObject.DisplayMode = "Flat Lines"
+                hatch_copy.ViewObject.DrawStyle = "Solid"
+                hatch_copy.ViewObject.PointSize = self.hatch_point_spin.value()
+                copied_objects.append(hatch_copy)
+            
+            if not copied_objects:
+                QtWidgets.QMessageBox.warning(None, "Warning", "No section elements found to copy!")
+                doc.removeObject(frozen_group.Name)
+                self.frozen_counter -= 1
+                return
+            
+            for obj in copied_objects:
+                frozen_group.addObject(obj)
+            
+            frozen_group.ViewObject.Visibility = True
+            
+            Gui.Selection.clearSelection()
+            Gui.Selection.addSelection(frozen_group)
+            
+            doc.recompute()
+            Gui.updateGui()
+            
+            QtWidgets.QMessageBox.information(
+                None, 
+                "Success", 
+                f"Section frozen as #{self.frozen_counter:03d}!\n"
+                f"Group: {frozen_group.Label}\n"
+                f"Elements: {len(copied_objects)}"
+            )
+            
+        except Exception as e:
+            App.Console.PrintError(f"Freeze Error: {str(e)}\n")
+            QtWidgets.QMessageBox.critical(None, "Error", f"Error while freezing:\n{str(e)}")
+
+    def create_faces_from_section(self, section_shape, tolerance=0.1):
+        """Create faces from section shape using consistent algorithm."""
+        faces = []
+        edges = section_shape.Edges
+        
+        if not edges:
+            return faces
+        
+        # Fix tolerance first
+        for e in edges:
+            try:
+                e.fixTolerance(tolerance)
+            except:
+                pass
+        
+        # Sort edges
+        try:
+            sorted_edges = Part.sortEdges(edges)
+        except:
+            try:
+                sorted_edges = Part.__sortEdges__(edges)
+            except:
+                sorted_edges = []
+                remaining = list(edges)
+                while remaining:
+                    group = [remaining.pop(0)]
+                    i = 0
+                    while i < len(remaining):
+                        edge = remaining[i]
+                        connected = False
+                        for g_edge in group:
+                            if (edge.Vertexes[0].Point.distanceToPoint(g_edge.Vertexes[-1].Point) < tolerance or
+                                edge.Vertexes[-1].Point.distanceToPoint(g_edge.Vertexes[0].Point) < tolerance):
+                                group.append(remaining.pop(i))
+                                connected = True
+                                i = 0
+                                break
+                        if not connected:
+                            i += 1
+                    sorted_edges.append(group)
+        
+        # Create faces from sorted edges
+        for group in sorted_edges:
+            try:
+                wire = Part.Wire(group)
+                
+                # Try to close wire if open
+                if not wire.isClosed():
+                    try:
+                        v1 = wire.Vertexes[0].Point
+                        v2 = wire.Vertexes[-1].Point
+                        if v1.distanceToPoint(v2) < tolerance:
+                            wire = Part.Wire(wire.Edges + [Part.makeLine(v1, v2)])
+                    except:
+                        pass
+                
+                if wire.isClosed():
+                    try:
+                        face = Part.Face(wire)
+                        
+                        # Fix face if needed
+                        if not face.isValid():
+                            face.fix(tolerance, tolerance, tolerance)
+                        
+                        if face.isValid() and face.Area > 1e-6:
+                            faces.append(face)
+                    except:
+                        pass
+            except:
+                pass
+        
+        return faces
+
+    def generate_face_hatch(self, face, spacing, plane_normal):
+        """Generate hatch lines for a single face."""
+        result = []
+        
+        try:
+            bbox = face.BoundBox
+            center = bbox.Center
+            
+            # Create local coordinate system on the plane
+            if abs(plane_normal.z) < 0.9:
+                xdir = App.Vector(0, 0, 1).cross(plane_normal)
+            else:
+                xdir = App.Vector(0, 1, 0).cross(plane_normal)
+            xdir.normalize()
+            
+            ydir = plane_normal.cross(xdir)
+            ydir.normalize()
+            
+            # ANSI 31: 45 degree angle
+            angle = math.radians(45)
+            hatch_dir = xdir * math.cos(angle) + ydir * math.sin(angle)
+            hatch_dir.normalize()
+            
+            perp_dir = plane_normal.cross(hatch_dir)
+            perp_dir.normalize()
+            
+            # Use diagonal for size - more reliable
+            size = self.diag * 2
+            
+            # Adjust spacing for small faces
+            if bbox.DiagonalLength < spacing * 2:
+                local_spacing = bbox.DiagonalLength / 3
+            else:
+                local_spacing = spacing
+            
+            # Generate hatch lines crossing the face
+            d = -size
+            while d <= size:
+                origin = center + d * perp_dir
+                
+                p1 = origin - hatch_dir * size
+                p2 = origin + hatch_dir * size
+                
+                try:
+                    line = Part.makeLine(p1, p2)
+                    
+                    # Use section() first (more reliable)
+                    inter = face.section(line)
+                    
+                    if inter.Edges:
+                        result.extend(inter.Edges)
+                    else:
+                        # Fallback to common()
+                        inter2 = face.common(line)
+                        if inter2.Edges:
+                            result.extend(inter2.Edges)
+                except:
+                    pass
+                
+                d += local_spacing
+            
+            # If no lines found, try perpendicular direction (cross-hatch)
+            if not result:
+                angle2 = math.radians(135)
+                hatch_dir2 = xdir * math.cos(angle2) + ydir * math.sin(angle2)
+                hatch_dir2.normalize()
+                perp_dir2 = plane_normal.cross(hatch_dir2)
+                perp_dir2.normalize()
+                
+                d = -size
+                while d <= size:
+                    origin = center + d * perp_dir2
+                    
+                    p1 = origin - hatch_dir2 * size
+                    p2 = origin + hatch_dir2 * size
+                    
+                    try:
+                        line = Part.makeLine(p1, p2)
+                        inter = face.section(line)
+                        
+                        if inter.Edges:
+                            result.extend(inter.Edges)
+                        else:
+                            inter2 = face.common(line)
+                            if inter2.Edges:
+                                result.extend(inter2.Edges)
+                    except:
+                        pass
+                    
+                    d += local_spacing
+            
+        except Exception as e:
+            App.Console.PrintError(f"Face hatch error: {str(e)}\n")
+        
+        return result
+
+    def generate_hatch(self, section_shape, spacing, plane_normal, plane_base):
+        """Generate hatch lines using per-face method."""
+        lines = []
+        
+        try:
+            # Create faces using consistent method
+            section_faces = self.create_faces_from_section(section_shape)
+            
+            # Fallback: bounding box face
+            if not section_faces:
+                bbox = section_shape.BoundBox
+                if bbox.DiagonalLength > 0:
+                    try:
+                        plane_face = Part.makePlane(
+                            bbox.DiagonalLength * 2,
+                            bbox.DiagonalLength * 2,
+                            bbox.Center,
+                            plane_normal
+                        )
+                        section_faces.append(plane_face)
+                    except:
+                        pass
+            
+            if not section_faces:
+                return lines
+            
+            # Generate hatch per face
+            all_lines = []
+            for face in section_faces:
+                face_lines = self.generate_face_hatch(face, spacing, plane_normal)
+                if face_lines:
+                    all_lines.extend(face_lines)
+            
+            if all_lines:
+                lines = all_lines
+            
+        except Exception as e:
+            App.Console.PrintError(f"Hatch generation error: {str(e)}\n")
+        
+        return lines
+
+    def rotate_vector(self, vector, axis, angle):
+        """Rotate a vector around an axis by angle (in radians)"""
+        rot = App.Rotation(axis, math.degrees(angle))
+        return rot.multVec(vector)
+
+    def mirror_solid(self, solid, plane_base, plane_normal):
+        """Properly mirror a solid across a plane."""
+        try:
+            n = App.Vector(plane_normal)
+            n.normalize()
+            
+            # Create reflection matrix: M = I - 2 * n * n^T
+            m = App.Matrix()
+            
+            m.A11 = 1 - 2 * n.x * n.x
+            m.A12 = -2 * n.x * n.y
+            m.A13 = -2 * n.x * n.z
+            
+            m.A21 = -2 * n.y * n.x
+            m.A22 = 1 - 2 * n.y * n.y
+            m.A23 = -2 * n.y * n.z
+            
+            m.A31 = -2 * n.z * n.x
+            m.A32 = -2 * n.z * n.y
+            m.A33 = 1 - 2 * n.z * n.z
+            
+            # First translate to origin
+            shape = solid.copy()
+            shape.translate(-plane_base)
+            
+            # Apply reflection
+            shape = shape.transformGeometry(m)
+            
+            # Translate back
+            shape.translate(plane_base)
+            
+            return shape
+            
+        except Exception as e:
+            App.Console.PrintError(f"Mirror error: {str(e)}\n")
+            return solid
+
+    def update_section(self):
+        doc = App.ActiveDocument
+        if not doc or not self.base_obj or self._updating:
+            return
+            
+        self._updating = True
+        
+        try:
+            # Hide main object
+            self.base_obj.ViewObject.Visibility = False
+            
+            offset_val = self.offset_spin.value()
+            
+            # Get rotation angles in radians
+            rot_x = math.radians(self.rotation_x_spin.value())
+            rot_y = math.radians(self.rotation_y_spin.value())
+            rot_z = math.radians(self.rotation_z_spin.value())
+            
+            # Determine plane type and base
+            if self.radio_yz.isChecked():
+                plane_type = "YZ"
+                center_pos = self.bbox.Center.x + offset_val
+                plane_base = App.Vector(center_pos, self.bbox.Center.y, self.bbox.Center.z)
+                plane_normal = App.Vector(1, 0, 0)
+            elif self.radio_xz.isChecked():
+                plane_type = "XZ"
+                center_pos = self.bbox.Center.y + offset_val
+                plane_base = App.Vector(self.bbox.Center.x, center_pos, self.bbox.Center.z)
+                plane_normal = App.Vector(0, 1, 0)
+            else:
+                plane_type = "XY"
+                center_pos = self.bbox.Center.z + offset_val
+                plane_base = App.Vector(self.bbox.Center.x, self.bbox.Center.y, center_pos)
+                plane_normal = App.Vector(0, 0, 1)
+            
+            # Apply rotations in order: Z, Y, X
+            rotated_plane_normal = plane_normal
+            
+            if rot_z != 0:
+                rotated_plane_normal = self.rotate_vector(rotated_plane_normal, App.Vector(0, 0, 1), rot_z)
+            if rot_y != 0:
+                rotated_plane_normal = self.rotate_vector(rotated_plane_normal, App.Vector(0, 1, 0), rot_y)
+            if rot_x != 0:
+                rotated_plane_normal = self.rotate_vector(rotated_plane_normal, App.Vector(1, 0, 0), rot_x)
+            
+            rotated_plane_base = plane_base
+            
+            # --- USE SECTION ALGORITHM ---
+            plane = Part.Plane(rotated_plane_base, rotated_plane_normal)
+            plane_shape = plane.toShape()
+            
+            try:
+                section_shape = self.base_obj.Shape.section(plane_shape)
+            except:
+                plane_face = Part.makePlane(
+                    self.diag * 5,
+                    self.diag * 5,
+                    rotated_plane_base,
+                    rotated_plane_normal
+                )
+                section_shape = self.base_obj.Shape.section(plane_face)
+            
+            # Extract section edges
+            section_edges = []
+            if section_shape.Wires:
+                for wire in section_shape.Wires:
+                    section_edges.extend(wire.Edges)
+            else:
+                section_edges = section_shape.Edges
+            
+            # --- BACKGROUND (cut solid) ---
+            cutter_size = self.diag * 5
+            cutter_box = Part.makeBox(cutter_size, cutter_size, cutter_size)
+            cutter_box.translate(App.Vector(-cutter_size/2, -cutter_size/2, 0))
+            
+            # Orient cutter box based on plane type
+            if plane_type == "YZ":
+                cutter_box.rotate(App.Vector(0,0,0), App.Vector(0,1,0), 90)
+            elif plane_type == "XZ":
+                cutter_box.rotate(App.Vector(0,0,0), App.Vector(1,0,0), -90)
+            
+            # Apply all rotations
+            if rot_z != 0:
+                cutter_box.rotate(App.Vector(0,0,0), App.Vector(0,0,1), math.degrees(rot_z))
+            if rot_y != 0:
+                cutter_box.rotate(App.Vector(0,0,0), App.Vector(0,1,0), math.degrees(rot_y))
+            if rot_x != 0:
+                cutter_box.rotate(App.Vector(0,0,0), App.Vector(1,0,0), math.degrees(rot_x))
+            
+            cutter_box.translate(rotated_plane_base)
+            
+            # Calculate cut solid
+            cut_solid = self.base_obj.Shape.cut(cutter_box)
+            
+            # Mirror background if enabled
+            if self.chk_mirror_bg.isChecked():
+                cut_solid = self.mirror_solid(cut_solid, rotated_plane_base, rotated_plane_normal)
+            
+            # --- UPDATE FEATURES ---
+            # Background
+            self.bg_feat.Shape = cut_solid
+            self.bg_feat.ViewObject.Transparency = self.spin_trans.value()
+            self.bg_feat.ViewObject.Visibility = True
+            
+            # Section fill
+            section_faces = self.create_faces_from_section(section_shape)
+            
+            if self.chk_section_fill.isChecked() and section_faces:
+                self.section_feat.Shape = Part.Compound(section_faces)
+                self.section_feat.ViewObject.Visibility = True
+            else:
+                self.section_feat.ViewObject.Visibility = False
+            
+            # Edge lines
+            if self.chk_edges.isChecked() and section_edges:
+                try:
+                    self.edge_feat.Shape = Part.Compound(section_edges)
+                    self.edge_feat.ViewObject.Visibility = True
+                except:
+                    self.edge_feat.ViewObject.Visibility = False
+            else:
+                self.edge_feat.ViewObject.Visibility = False
+            
+            # Hatch lines
+            if self.chk_hatch.isChecked():
+                spacing = self.spin_spacing.value()
+                hatch_lines = self.generate_hatch(
+                    section_shape, spacing, rotated_plane_normal, rotated_plane_base
+                )
+                
+                if hatch_lines:
+                    try:
+                        self.hatch_feat.Shape = Part.Compound(hatch_lines)
+                        self.hatch_feat.ViewObject.Visibility = True
+                        self.hatch_feat.ViewObject.PointSize = self.hatch_point_spin.value()
+                    except:
+                        self.hatch_feat.ViewObject.Visibility = False
+                else:
+                    self.hatch_feat.ViewObject.Visibility = False
+            else:
+                self.hatch_feat.ViewObject.Visibility = False
+                    
+        except Exception as e:
+            App.Console.PrintError(f"Section Error: {str(e)}\n")
+        finally:
+            self._updating = False
+            
+        doc.recompute()
+        Gui.updateGui()
+
+    def closeEvent(self, event):
+        """Cleanup on close"""
+        if self.base_obj:
+            self.base_obj.ViewObject.Visibility = True
+            
+        doc = App.ActiveDocument
+        if doc:
+            for feat in [self.section_feat, self.edge_feat, self.hatch_feat, self.bg_feat]:
+                if feat and doc.getObject(feat.Name):
+                    try:
+                        doc.removeObject(feat.Name)
+                    except:
+                        pass
+            doc.recompute()
+        
+        if self._update_timer:
+            self._update_timer.stop()
+            self._update_timer = None
+        
+        super().closeEvent(event)
+
+# Run the macro
+try:
+    section_analyzer.close()
+except NameError:
+    pass
+
+section_analyzer = LiveSectionAnalyzer()
